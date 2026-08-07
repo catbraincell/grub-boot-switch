@@ -23,29 +23,7 @@ sudo dnf install cmake rpm-build dpkg    # dpkg: for the deb target only
 sudo apt install cmake dpkg-dev rpm      # rpm: for the rpm target only
 ```
 
-And for the firmware:
-
-```sh
-sudo apt install gcc-arm-none-eabi libnewlib-arm-none-eabi
-sudo dnf install arm-none-eabi-gcc-cs arm-none-eabi-newlib
-```
-
-Download SDKs for the firmware:
-
-```sh
-git clone --recursive https://github.com/raspberrypi/pico-sdk.git
-git clone --recursive https://github.com/libopencm3/libopencm3.git
-make -C libopencm3 TARGETS='stm32/f0 stm32/f1 stm32/f4' -j$(nproc)
-```
-
-Then point the configure step at them:
-
-```sh
-cmake -B build -S . -DPICO_SDK_PATH=/where/pico-sdk -DOPENCM3_PATH=/where/libopencm3
-```
-
-See [firmware/README.md](firmware/README.md) for choosing the STM32 part,
-flashing, and changing pins.
+To build your custom firmware see [Rebuild Firmware](###Rebuild-Firmware)
 
 ## Install
 
@@ -58,30 +36,9 @@ cmake --build build --target TARGET
 |-----------------|-------------------------------------------------------------|
 | `deb`           | `build/grub-boot-switch{,-config}_<ver>_all.deb`            |
 | `rpm`           | `build/grub-boot-switch{,-config}-<ver>-1.noarch.rpm` (needs `rpmbuild`) |
-| `stm32f103c8t6` | `build/gbswitch-<part>.bin` -- firmware (needs libopencm3)   |
-| `rp2040`        | `build/gbswitch-rp2040.uf2` -- firmware (needs pico-sdk)   |
-| `install`       | copies the files straight into a rootfs (honours `DESTDIR`) |
-| ``              | builds every target whose tooling is installed              |
-
-Firmware targets are named after the exact MCU -- one per part. The configure
-step lists every target as ON or OFF, with the reason when it is OFF, so a
-missing SDK only drops the targets that need it:
-
-```
--- grub-boot-switch 0.1.0 -- default build targets:
---   deb            ON   -> build/grub-boot-switch-config_0.1.0_all.deb + grub-boot-switch_0.1.0_all.deb
---   rpm            OFF  -- rpmbuild not found
---   stm32f103c8t6  ON   -> build/gbswitch-stm32f103c8t6.bin
---   stm32f072rbt6  ON   -> build/gbswitch-stm32f072rbt6.bin
---   stm32f401ccu6  ON   -> build/gbswitch-stm32f401ccu6.bin
---   stm32f407vgt6  ON   -> build/gbswitch-stm32f407vgt6.bin
---   rp2040         ON   -> build/gbswitch-rp2040.uf2
-```
-
-An OFF target still builds on request (`--target rp2040`) and says what is
-missing. The same list is printed again as a summary at the end of a default
-build. See [firmware/README.md](firmware/README.md) for the firmware itself:
-SDKs, choosing the STM32 part, flashing, and changing pins.
+| `install`       | copies the files straight into a rootfs (manual install)    |
+| mcu names       | build firmware for a specific microcontroller               |
+| N/A             | builds every target                                         |
 
 Then:
 
@@ -96,7 +53,8 @@ sudo dnf install ./build/grub-boot-switch-config-0.1.0-1.noarch.rpm \
 ```
 
 Drop the second path on a headless box: `grub-boot-switch-config` boots the
-machine on its own, and the GUI can be added later.
+machine on its own. You may modify `/etc/grub-boot-switch/bindings` directly
+without GUI.
 
 ## Usage
 
@@ -116,48 +74,6 @@ sel1="gnulinux-simple-1234-abcd"
 Then apply the changes:
 ```sh
 sudo update-grub        # or: sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-```
-
-## Advanced
-
-## Add more slots
-
-Put more `selX=` in the config file `/etc/grub-boot-switch/bindings` like:
-```conf
-sel2=""
-sel16=""
-sel17=""
-...
-```
-
-## Add custom targets
-
-Just make sure u have a very unique `$menuentry_id_option` there:
-```sh
-#!/bin/sh
-# /etc/grub.d/15_linux_custom_kernel -- one entry for one exact kernel.
-set -e
-
-KVER=6.12.74-custom
-BOOT_UUID=xxxx-xxxx   # fs holding /boot (blkid)
-ROOT_UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee   # fs holding /
-
-cat <<EOF
-menuentry 'Linux ${KVER}' --class gnu-linux \$menuentry_id_option 'linux-${KVER}' {
-	insmod part_gpt
-	insmod ext2
-	search --no-floppy --fs-uuid --set=root ${BOOT_UUID}
-	linux /boot/vmlinuz-${KVER} root=UUID=${ROOT_UUID} ro quiet
-	initrd /boot/initrd.img-${KVER}
-}
-EOF
-
-exit 0
-```
-
-Add to the config file `/etc/grub-boot-switch/bindings`:
-```conf
-sel9="linux-6.12.74-custom"
 ```
 
 ## How it works
@@ -187,6 +103,67 @@ sel9="linux-6.12.74-custom"
    machine stops at the normal menu and waits for user input.
 
 Need a specific boot entry? Add your own `xx_probe` with a stable id and bind to it.
+
+### Files
+
+grub-boot-switch-config:
+```
+/etc/grub.d/99_grub-boot-switch       the generator (package-owned, not a conffile)
+/etc/grub-boot-switch/config          SWITCH_UUID, MENU_TIMEOUT, MARKER_DIR (conffile)
+/etc/grub-boot-switch/bindings        selN= -> menuentry id or title (conffile, app-managed)
+/usr/lib/udev/rules.d/99-grub-boot-switch.rules  hides the device from the desktop
+```
+
+grub-boot-switch:
+```
+/usr/bin/grub-boot-switch-manager     GUI (runs as root)
+/usr/share/applications/*.desktop     launcher
+```
+
+`cmake --build build --target install` is unsplit -- it stages every file above
+into `DESTDIR`, the same as before.
+
+## Advanced
+
+### Add more slots
+
+Put more `selX=` in the config file `/etc/grub-boot-switch/bindings` like:
+```conf
+sel2=""
+sel16=""
+sel17=""
+...
+```
+
+### Add custom targets
+
+Just make sure u have a very unique `$menuentry_id_option` there:
+```sh
+#!/bin/sh
+# /etc/grub.d/15_linux_custom_kernel -- one entry for one exact kernel.
+set -e
+
+KVER=6.12.74-custom
+BOOT_UUID=xxxx-xxxx   # fs holding /boot (blkid)
+ROOT_UUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee   # fs holding /
+
+cat <<EOF
+menuentry 'Linux ${KVER}' --class gnu-linux \$menuentry_id_option 'linux-${KVER}' {
+	insmod part_gpt
+	insmod ext2
+	search --no-floppy --fs-uuid --set=root ${BOOT_UUID}
+	linux /boot/vmlinuz-${KVER} root=UUID=${ROOT_UUID} ro quiet
+	initrd /boot/initrd.img-${KVER}
+}
+EOF
+
+exit 0
+```
+
+Add to the config file `/etc/grub-boot-switch/bindings`:
+```conf
+sel9="linux-6.12.74-custom"
+```
 
 ### Raw Install
 Use cmake install instead of a package manager.  
@@ -229,21 +206,52 @@ sudo rm -f /etc/grub.d/99_grub-boot-switch
 sudo update-grub
 ```
 
-## Files
+### Rebuild Firmware
 
-grub-boot-switch-config:
+| target          | what it does                                                |
+|-----------------|-------------------------------------------------------------|
+| `stm32f103c8t6` | `build/gbswitch-<part>.bin` -- firmware (needs libopencm3)  |
+| `rp2040`        | `build/gbswitch-rp2040.uf2` -- firmware (needs pico-sdk)    |
+
+Firmware targets are named after the exact MCU -- one per part. A missing SDK 
+only drops the targets that need it:
+
 ```
-/etc/grub.d/99_grub-boot-switch       the generator (package-owned, not a conffile)
-/etc/grub-boot-switch/config          SWITCH_UUID, MENU_TIMEOUT, MARKER_DIR (conffile)
-/etc/grub-boot-switch/bindings        selN= -> menuentry id or title (conffile, app-managed)
-/usr/lib/udev/rules.d/99-grub-boot-switch.rules  hides the device from the desktop
+-- grub-boot-switch 0.1.0 -- default build targets:
+--   deb            ON   -> build/grub-boot-switch-config_0.1.0_all.deb + grub-boot-switch_0.1.0_all.deb
+--   rpm            OFF  -- rpmbuild not found
+--   stm32f103c8t6  ON   -> build/gbswitch-stm32f103c8t6.bin
+--   stm32f072rbt6  ON   -> build/gbswitch-stm32f072rbt6.bin
+--   stm32f401ccu6  ON   -> build/gbswitch-stm32f401ccu6.bin
+--   stm32f407vgt6  ON   -> build/gbswitch-stm32f407vgt6.bin
+--   rp2040         ON   -> build/gbswitch-rp2040.uf2
 ```
 
-grub-boot-switch:
-```
-/usr/bin/grub-boot-switch-manager     GUI (runs as root)
-/usr/share/applications/*.desktop     launcher
+See [firmware/README.md](firmware/README.md) for the firmware itself: SDKs, 
+choosing the STM32 part, flashing, and changing pins.
+
+#### Firmware Dependencies
+
+MCU toolchains:
+
+```sh
+sudo apt install gcc-arm-none-eabi libnewlib-arm-none-eabi
+sudo dnf install arm-none-eabi-gcc-cs arm-none-eabi-newlib
 ```
 
-`cmake --build build --target install` is unsplit -- it stages every file above
-into `DESTDIR`, the same as before.
+MCU SDKs:
+
+```sh
+git clone --recursive https://github.com/raspberrypi/pico-sdk.git
+git clone --recursive https://github.com/libopencm3/libopencm3.git
+make -C libopencm3 TARGETS='stm32/f0 stm32/f1 stm32/f4' -j$(nproc)
+```
+
+Then point the configure step at them:
+
+```sh
+cmake -B build -S . -DPICO_SDK_PATH=/where/pico-sdk -DOPENCM3_PATH=/where/libopencm3
+```
+
+See [firmware/README.md](firmware/README.md) for choosing the STM32 part,
+flashing, and changing pins.
