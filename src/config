@@ -4,7 +4,7 @@
 # Magic filesystem UUID carried by every switch device. 
 # Keep the UUID in sync in /usr/lib/udev/rules.d/99-grub-boot-switch.rules
 # so the device stays hidden from the desktop.
-SWITCH_UUID="b0075e1e-c70b-4007-b005-e1ec70b1de50"
+SWITCH_UUID="67727562-626f-6f74-7377-697463680001"
 
 # Directory on the switch device holding the position marker.
 MARKER_DIR="grub-boot-switch"

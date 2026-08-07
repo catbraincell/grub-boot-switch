@@ -25,7 +25,12 @@ Block size 1024. One block group. Layout (block -> use):
   8  /grub-boot-switch (inode 11) data
   9  /grub-boot-switch/sel00 (inode 12) data
 """
-import struct, sys
+import struct, sys, uuid
+
+# Magic filesystem UUID every switch device carries. Must stay in sync with
+# SWITCH_UUID in src/config and the ID_FS_UUID match in
+# src/99-grub-boot-switch.rules.
+SWITCH_UUID      = '67727562-626f-6f74-7377-697463680001'
 
 BS               = 1024      # block size
 IMG_BLOCKS       = 10        # total blocks 0..9
@@ -86,8 +91,7 @@ sbp(90,  '<H', 0)                  # s_block_group_nr
 sbp(92,  '<I', 0)                  # s_feature_compat
 sbp(96,  '<I', 0x0002)            # s_feature_incompat = FILETYPE
 sbp(100, '<I', 0)                  # s_feature_ro_compat
-sb[104:120] = bytes([0x9b,0x2e,0x1a,0x44,0x55,0x66,0x77,0x88,
-                     0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,0x01])  # s_uuid
+sb[104:120] = uuid.UUID(SWITCH_UUID).bytes                       # s_uuid
 sb[120:136] = b'gbswitch'.ljust(16, b'\x00')                    # s_volume_name
 put(B_SUPER * BS, sb)
 
