@@ -7,13 +7,13 @@
 #define BOARD_TUD_RHPORT 0
 #endif
 
-void switch_gpio_init(void);   // from msc_disk.c
+void sel_init(void);           // from msc_disk.c: switch pins or pot ADC
 void buttons_init(void);       // from buttons.c
 void buttons_task(void);
 
 int main(void) {
   board_init();
-  switch_gpio_init();
+  sel_init();
   buttons_init();
   tud_init(BOARD_TUD_RHPORT);
 

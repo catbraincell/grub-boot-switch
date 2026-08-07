@@ -447,6 +447,7 @@ target_link_libraries(gbswitch-rp2040
     tinyusb_device
     tinyusb_board
     hardware_gpio
+    hardware_adc      # the potentiometer selection input (SEL_ADC in msc_disk.c)
 )
 
 pico_add_extra_outputs(gbswitch-rp2040)   # produces .uf2

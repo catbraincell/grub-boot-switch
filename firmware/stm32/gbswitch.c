@@ -3,7 +3,8 @@
  *
  * Composite USB device:
  *   Interface 0 : Mass Storage  -> the read-only ext2 /grub-boot-switch/selNN
- *                 drive, with NN overlaid from a GPIO binary switch (PB0..PB3).
+ *                 drive, with NN overlaid from the selection input: either the
+ *                 binary switch (PB0..PB3) or a potentiometer on PA0.
  *   Interface 1 : HID           -> system control, driven by two momentary
  *                 buttons (PB8, PB9).
  *
@@ -16,6 +17,7 @@
  *
  *   USB D-/D+ : PA11 / PA12 (all families).
  *   Switch    : PB0..PB3 (bit 0 = PB0), pulled up, close to GND for a 1.
+ *   Pot       : PA0 (only when SEL_ADC is defined below).
  *   Buttons   : PB8, PB9, pulled up, press = to GND (active low).
  */
 
@@ -23,6 +25,7 @@
 #include <stdint.h>
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
+#include <libopencm3/stm32/adc.h>
 #include <libopencm3/usb/usbd.h>
 #include <libopencm3/usb/msc.h>
 #include <libopencm3/usb/hid.h>
@@ -50,12 +53,42 @@
 #define EP_MSC_IN  0x82
 #define EP_HID_IN  0x83
 
-/* ============================================================ GPIO: switch */
+/* ============================================================ selection input
+ * Two ways to pick N; exactly one is compiled in:
+ *
+ *   SEL_ADC not defined : the binary strapping pins       (default)
+ *   SEL_ADC defined     : a potentiometer on the ADC pin
+ *
+ * Uncomment the line below to read the pot instead. Both wirings can stay on
+ * the board -- this only chooses which one the firmware reads.
+ */
+#define SEL_ADC
+
+/* Pot positions: the ADC range is split into this many equal slots, so N runs
+ * 0..NUM_SLOTS-1. Unused by the strapping build. */
+#define NUM_SLOTS 16
+
+#if NUM_SLOTS < 2 || NUM_SLOTS > 100
+#error "NUM_SLOTS must be 2..100 -- selNN carries two digits"
+#endif
+
+#ifdef SEL_ADC
+/* Potentiometer: wiper to PA0, the two ends to 3V3 and GND. Turning it from
+ * one stop to the other walks N through every slot. PA0 is channel 0 of ADC1
+ * on F0, F1 and F4 alike -- to move it, change all three lines below. */
+#define POT_PORT GPIOA
+#define POT_PIN  GPIO0
+#define POT_CH   0
+#define ADC_FULL 4096u       /* 12-bit converter */
+#define POT_AVG  4           /* samples per read, averaged */
+#define POT_HYST (ADC_FULL / (NUM_SLOTS * 8u))   /* dead-band at a slot edge */
+#else
 #define SW_PORT GPIOB
 static const uint16_t SW_PINS[] = {
     GPIO0, GPIO1, GPIO2, GPIO3    /* 4 bits -> N = 0..15 */
 };
 #define NUM_SW (sizeof(SW_PINS) / sizeof(SW_PINS[0]))
+#endif
 
 /* ============================================================ GPIO: buttons */
 /* HID System Control bits (one report byte, three defined bits) */
@@ -75,31 +108,115 @@ static const button_t BUTTONS[] = {
 };
 #define NUM_BTN (sizeof(BUTTONS) / sizeof(BUTTONS[0]))
 
-static void io_init(void) {
+static void btn_init(void) {
+    rcc_periph_clock_enable(RCC_GPIOB);
+#if defined(STM32F1)
+    for (unsigned i = 0; i < NUM_BTN; i++)
+        gpio_set_mode(BTN_PORT, GPIO_MODE_INPUT,
+                      GPIO_CNF_INPUT_PULL_UPDOWN, BUTTONS[i].pin);
+    gpio_set(BTN_PORT, GPIO8|GPIO9);                                /* pull-up  */
+#else /* F0 / F4 */
+    for (unsigned i = 0; i < NUM_BTN; i++)
+        gpio_mode_setup(BTN_PORT, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, BUTTONS[i].pin);
+#endif
+}
+
+#ifdef SEL_ADC
+/* Single channel, software triggered, polled: the slowest sample time each
+ * family offers is still far quicker than one USB read, and a pot is a high
+ * enough source impedance to want it. */
+static void sel_init(void) {
+    uint8_t seq[1] = { POT_CH };
+
+    rcc_periph_clock_enable(RCC_GPIOA);
+    rcc_periph_clock_enable(RCC_ADC1);
+#if defined(STM32F1)
+    rcc_set_adcpre(RCC_CFGR_ADCPRE_PCLK2_DIV8);      /* 72/8 = 9 MHz, max 14 */
+    gpio_set_mode(POT_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, POT_PIN);
+    adc_power_off(ADC1);
+    adc_disable_scan_mode(ADC1);
+    adc_set_single_conversion_mode(ADC1);
+    adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_55DOT5CYC);
+    /* F1 has no free-standing start bit: arm the software trigger instead. */
+    adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_SWSTART);
+    adc_power_on(ADC1);
+    for (volatile uint32_t i = 0; i < 10000; i++) __asm__("nop");   /* tSTAB */
+    adc_reset_calibration(ADC1);
+    adc_calibrate(ADC1);
+#elif defined(STM32F0)
+    gpio_mode_setup(POT_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, POT_PIN);
+    adc_power_off(ADC1);
+    adc_set_clk_source(ADC1, ADC_CLKSOURCE_ADC);     /* dedicated 14 MHz HSI14 */
+    adc_calibrate(ADC1);                             /* has to run powered off */
+    adc_set_operation_mode(ADC1, ADC_MODE_SEQUENTIAL);
+    adc_disable_external_trigger_regular(ADC1);
+    adc_set_right_aligned(ADC1);
+    adc_set_sample_time_on_all_channels(ADC1, ADC_SMPTIME_071DOT5);
+    adc_power_on(ADC1);
+#elif defined(STM32F4)
+    gpio_mode_setup(POT_PORT, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, POT_PIN);
+    adc_power_off(ADC1);
+    adc_set_clk_prescale(ADC_CCR_ADCPRE_BY8);        /* 84/8 = 10.5 MHz, max 36 */
+    adc_disable_scan_mode(ADC1);
+    adc_set_single_conversion_mode(ADC1);
+    adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_112CYC);
+    adc_power_on(ADC1);
+#endif
+    adc_set_regular_sequence(ADC1, 1, seq);
+}
+
+static uint32_t pot_raw(void) {
+    adc_start_conversion_regular(ADC1);
+    while (!adc_eoc(ADC1));
+    return adc_read_regular(ADC1);
+}
+
+/* The slot under the wiper. A pot parked on a boundary would otherwise dither
+ * between two values, and a single host read spans many blocks: the overlaid
+ * digits have to be the same in all of them. So a slot, once taken, is only
+ * given up once the reading is POT_HYST past its edge. */
+static uint8_t read_sel_N(void) {
+    static uint8_t cur = 0xFF;   /* 0xFF = no slot taken yet */
+
+    uint32_t v = 0;
+    for (unsigned i = 0; i < POT_AVG; i++) v += pot_raw();
+    v /= POT_AVG;
+
+    uint32_t slot = (v * NUM_SLOTS) / ADC_FULL;
+    if (slot >= NUM_SLOTS) slot = NUM_SLOTS - 1;
+
+    if (cur == 0xFF) {
+        cur = (uint8_t)slot;
+    } else if (slot != cur) {
+        uint32_t lo = ((uint32_t)cur * ADC_FULL) / NUM_SLOTS;        /* edges of */
+        uint32_t hi = ((uint32_t)(cur + 1) * ADC_FULL) / NUM_SLOTS;  /* held slot */
+        if ((slot < cur && v + POT_HYST < lo) || (slot > cur && v > hi + POT_HYST))
+            cur = (uint8_t)slot;
+    }
+    return cur;
+}
+
+#else /* strapping pins */
+static void sel_init(void) {
     rcc_periph_clock_enable(RCC_GPIOB);
 #if defined(STM32F1)
     for (unsigned i = 0; i < NUM_SW; i++)
         gpio_set_mode(SW_PORT, GPIO_MODE_INPUT,
                       GPIO_CNF_INPUT_PULL_UPDOWN, SW_PINS[i]);
     gpio_set(SW_PORT, GPIO0|GPIO1|GPIO2|GPIO3);                     /* pull-up */
-    for (unsigned i = 0; i < NUM_BTN; i++)
-        gpio_set_mode(BTN_PORT, GPIO_MODE_INPUT,
-                      GPIO_CNF_INPUT_PULL_UPDOWN, BUTTONS[i].pin);
-    gpio_set(BTN_PORT, GPIO8|GPIO9);                                /* pull-up  */
 #else /* F0 / F4 */
     for (unsigned i = 0; i < NUM_SW; i++)
         gpio_mode_setup(SW_PORT, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, SW_PINS[i]);
-    for (unsigned i = 0; i < NUM_BTN; i++)
-        gpio_mode_setup(BTN_PORT, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, BUTTONS[i].pin);
 #endif
 }
 
-static uint8_t read_switch_N(void) {
+static uint8_t read_sel_N(void) {
     uint32_t v = 0;
     for (unsigned i = 0; i < NUM_SW; i++)
         if (gpio_get(SW_PORT, SW_PINS[i]) == 0) v |= (1u << i);  /* active low */
     return (v > 99) ? 0 : (uint8_t)v;
 }
+#endif
 
 /* ============================================================ MSC blocks */
 static inline void ov(uint8_t *buf, uint32_t start, uint32_t off, char c) {
@@ -116,7 +233,7 @@ static int read_block(uint32_t lba, uint8_t *copy_to) {
     }
     memcpy(copy_to, ext2_image + start, n);
 
-    uint8_t N = read_switch_N();
+    uint8_t N = read_sel_N();
     char tens = (char)('0' + N / 10);
     char ones = (char)('0' + N % 10);
     ov(copy_to, start, OFF_NAME_TENS, tens);
@@ -336,7 +453,8 @@ static usbd_device *usb_setup(void) {
 
 int main(void) {
     usbd_device *dev = usb_setup();
-    io_init();
+    sel_init();
+    btn_init();
 
     usb_msc_init(dev, EP_MSC_IN, 64, EP_MSC_OUT, 64,
                  "STM32", "GrubBootSwitch", "1.0",

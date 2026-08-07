@@ -7,9 +7,10 @@ that drive there is one file:
 /grub-boot-switch/selNN        # NN = 00..15
 ```
 
-`NN` is whatever number your binary switch is set to — four lines, so sixteen
-positions. GRUB reads the drive at boot and picks a boot entry from it. Both
-builds also expose two power buttons over USB: power and sleep.
+`NN` is whatever number your selector is set to. Out of the box that is a binary
+switch — four lines, so sixteen positions — and a one-line macro swaps it for a
+potentiometer on an ADC pin. GRUB reads the drive at boot and picks a boot entry
+from it. Both builds also expose two power buttons over USB: power and sleep.
 
 ## Dependencies
 
@@ -95,9 +96,11 @@ debugfs -R "ls -l /grub-boot-switch" grub-boot-switch.img
 |---|---|---|
 | USB | the board's USB port | PA11 / PA12 |
 | Switch (4 lines) | GPIO 2..5, bit 0 = GPIO 2 | PB0..PB3, bit 0 = PB0 |
+| Potentiometer | A2 (GPIO 28) | PA0 |
 | Buttons | GPIO 10, 11 | PB8, PB9 |
 
-Buttons are, in order: power, sleep.
+Buttons are, in order: power, sleep. The potentiometer is only read when the
+build is switched to it (see below); by default the pot pin is untouched.
 
 Everything is pulled **up** internally and wired to **GND**, so a closed contact
 reads low.
@@ -131,6 +134,35 @@ All switch pins must be on the same port. To use a different port, change
 
 The count follows the size of the list, so adding lines adds positions: five
 lines give 0..31, six give 0..63, seven give 0..99 (values above 99 read as 0).
+
+## Using a potentiometer instead
+
+A single pot can replace the switch lines: wire its two ends to **3V3** and
+**GND** and its wiper to the ADC pin — **A2** (GPIO 28) on the Pico, **PA0** on
+STM32. Then uncomment one line near the top of `rp2040/msc_disk.c` or
+`stm32/gbswitch.c` and rebuild:
+
+```c
+#define SEL_ADC          /* rp2040/msc_disk.c: // #define SEL_ADC */
+
+#define NUM_SLOTS 16
+```
+
+`NUM_SLOTS` cuts the converter's range into that many equal slots, so turning
+the pot from one stop to the other walks `N` through `0 .. NUM_SLOTS-1`. The
+firmware accepts anything from 2 to 100 — `selNN` carries two digits — but the
+boot side only knows `sel00`..`sel15`, so above 16 the extra positions read as
+"no marker" and land on the GRUB menu. Sixteen slots over one turn is about 20°
+of travel each; fewer slots are easier to hit blind.
+
+The reading is averaged and each slot is held until the pot is a little past its
+edge, so a wiper parked on a boundary does not flicker between two entries.
+
+Both wirings can stay on the board — the macro only picks which one the firmware
+reads. The switch pins are left alone in pot builds, and the pot pin is left
+alone otherwise. To move the pot to another pin, edit `POT_GPIO`/`POT_CH` next
+to that macro (RP2040: the two must be the same input, A0 = GPIO 26/channel 0,
+A1 = 27/1, A2 = 28/2), or `POT_PORT`/`POT_PIN`/`POT_CH` on STM32.
 
 ## Changing the buttons
 
