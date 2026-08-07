@@ -1,0 +1,93 @@
+#!/bin/sh
+# /etc/grub.d/99_grub-boot-switch
+#
+# Hardware boot switch. Emits ONLY switch-detection + default/timeout selection.
+# It authors no menuentries: 10_linux and 30_os-prober remain the sole source of
+# boot entries, so there is nothing to de-duplicate and no second prober to drift.
+#
+# Encoding (matches the hardware):
+#   sel00, or a slot with no binding -> show the GRUB menu (infinite wait by default)
+#   sel01..15 with a binding         -> auto-boot the entry sel<n>= names in
+#                                       BINDINGS (its menuentry id, or its title
+#                                       when it has none -- GRUB matches both)
+#   otherwise                        -> emit nothing that overrides GRUB, so
+#                                       grub.cfg's own default/timeout govern,
+#                                       exactly as if this package were not
+#                                       installed.
+#
+# "Otherwise" is the switch saying nothing at all: no marker file present
+# (missing/glitched firmware), or the switch device itself absent. Neither is a
+# request for the menu, so neither overrides the machine's normal boot.
+#
+# A bound slot names its entry and stops there. It does not re-test whether the
+# target's filesystem is present: every entry grub-mkconfig writes already opens
+# with its own `search --fs-uuid --set=root <uuid>` on that same filesystem, so a
+# guard here would only duplicate, one level up, a check the entry itself makes
+# three lines later.
+#
+# The firmware presents a directory MARKER_DIR on the device containing exactly
+# one file selNN (00..15) for the current position. Only file existence is
+# tested; no content from the device is read or executed.
+set -e
+
+CONFIG=/etc/grub-boot-switch/config
+BINDINGS=/etc/grub-boot-switch/bindings
+[ -r "$CONFIG" ]   && . "$CONFIG"
+[ -r "$BINDINGS" ] && . "$BINDINGS"
+: "${SWITCH_UUID:=}"
+: "${MENU_TIMEOUT:=-1}"
+: "${MARKER_DIR:=grub-boot-switch}"
+
+# Not configured -> emit nothing, leave GRUB untouched.
+if [ -z "$SWITCH_UUID" ]; then
+    echo "# grub-boot-switch: SWITCH_UUID unset in $CONFIG; disabled."
+    exit 0
+fi
+
+show_menu="set timeout_style=menu; set timeout=${MENU_TIMEOUT}"
+
+cat <<EOF2
+# --- grub-boot-switch (generated) ---
+# Ensure the drivers needed to read the switch device (ext2) are loaded, even if
+# the host's /boot fs differs.
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+if search --no-floppy --fs-uuid --set=gbs_dev ${SWITCH_UUID} ; then
+  set bootswitch=none
+EOF2
+
+# sel00..sel15 are first-class markers (zero-padded two-digit names). If NONE is
+# present (missing/glitched firmware), bootswitch stays "none" and no block below
+# fires, so GRUB's own default and timeout govern -- as if this package were not
+# installed.
+n=0
+while [ "$n" -le 15 ]; do
+    pad=$(printf '%02d' "$n")
+    echo "  if [ -f (\${gbs_dev})/${MARKER_DIR}/sel${pad} ]; then set bootswitch=${n}; fi"
+    n=$((n + 1))
+done
+
+# sel00 -> menu (bootswitch value 0)
+echo "  if [ \"\${bootswitch}\" = 0 ]; then ${show_menu}; fi"
+
+# All 15 slots are covered whatever BINDINGS happens to list: a position with no
+# sel<n>= line of its own is simply unbound, and unbound means the menu. (The app
+# only offers the positions the file lists; the boot side never leaves a gap.)
+n=1
+while [ "$n" -le 15 ]; do
+    eval "id=\${sel${n}:-}"
+    if [ -n "$id" ]; then
+        echo "  if [ \"\${bootswitch}\" = ${n} ]; then set default=\"${id}\"; set timeout=0; fi"
+    else
+        echo "  if [ \"\${bootswitch}\" = ${n} ]; then ${show_menu}; fi"
+    fi
+    n=$((n + 1))
+done
+
+cat <<EOF2
+fi
+# --- end grub-boot-switch ---
+EOF2
+
+exit 0

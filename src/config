@@ -1,0 +1,15 @@
+# /etc/grub-boot-switch/config
+# Run `sudo update-grub` after editing.
+
+# Magic filesystem UUID carried by every switch device. 
+# Keep the UUID in sync in /usr/lib/udev/rules.d/99-grub-boot-switch.rules
+# so the device stays hidden from the desktop.
+SWITCH_UUID="b0075e1e-c70b-4007-b005-e1ec70b1de50"
+
+# Directory on the switch device holding the position marker.
+MARKER_DIR="grub-boot-switch"
+
+# Timeout (seconds) for the GRUB menu when selected slot is empty.
+# -1 = wait indefinitely. Anything else (no marker, no switch device) leaves
+# grub.cfg's own timeout alone.
+MENU_TIMEOUT=-1

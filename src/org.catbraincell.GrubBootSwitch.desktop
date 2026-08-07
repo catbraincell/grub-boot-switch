@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GRUB Boot Switch
+Comment=Manage hardware boot-switch slots
+Exec=grub-boot-switch-manager
+Icon=computer
+Terminal=false
+Categories=GTK;System;Settings;
+Keywords=grub;boot;switch;os;dualboot;
+StartupNotify=true

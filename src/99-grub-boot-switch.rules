@@ -1,0 +1,5 @@
+# Hide the GRUB boot-switch device from the running desktop.
+# The block device stays visible to lsblk.
+#
+# Keep the UUID in sync with SWITCH_UUID in /etc/grub-boot-switch/config.
+SUBSYSTEM=="block", ENV{ID_FS_UUID}=="b0075e1e-c70b-4007-b005-e1ec70b1de50", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0"

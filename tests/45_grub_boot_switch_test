@@ -1,0 +1,107 @@
+#!/bin/sh
+# /etc/grub.d/45_grub_boot_switch_test -- MANUAL TEST FIXTURE, NOT FOR RELEASE
+#
+# Emits synthetic menuentries that exercise every case the app's parser has to
+# handle, so you can see the picker's real behaviour on a real machine.
+#
+#   sudo install -m0755 tests/45_grub_boot_switch_test /etc/grub.d/
+#   sudo update-grub
+#   sudo grub-boot-switch-manager          # look at the picker and the toast
+#
+# Remove when done:
+#
+#   sudo rm /etc/grub.d/45_grub_boot_switch_test
+#   sudo update-grub
+#
+# Safety: numbered 45 so these land AFTER 10_linux and 30_os-prober -- entry 0
+# stays your real OS, so the machine's normal boot and its fallback are
+# unchanged. No entry here loads a kernel or chainloads anything: the body is
+# `true`, so selecting one just returns you to the menu with an error. They all
+# carry "GBS TEST" in the title so they are obvious in the menu and easy to spot.
+set -e
+
+cat <<'EOF'
+# --- grub-boot-switch manual test entries ---
+
+# 1. Ordinary entry. EXPECT: offered in the picker, binds, boots (well, errors
+#    harmlessly). This is the baseline.
+menuentry '[GBS TEST] 1 ordinary' $menuentry_id_option 'gbs-test-ordinary' {
+	true
+}
+
+# 2. No --id at all. EXPECT: offered, bound BY TITLE -- with no id, the title is
+#    what GRUB matches. Check grub.cfg gets set default="[GBS TEST] 2 no id".
+menuentry '[GBS TEST] 2 no id' {
+	true
+}
+
+# 3+4. Two entries, same title, different ids. EXPECT: BOTH offered (they are
+#    genuinely different entries) and flagged by the "title identical to
+#    another" note -- they are indistinguishable in the dropdown.
+menuentry '[GBS TEST] 3 duplicate title' $menuentry_id_option 'gbs-test-dup-title-a' {
+	true
+}
+menuentry '[GBS TEST] 3 duplicate title' $menuentry_id_option 'gbs-test-dup-title-b' {
+	true
+}
+
+# 5+6. Two entries sharing one id -- what a block-level disk clone produces,
+#    since ids are built from the filesystem UUID. EXPECT: only the FIRST is
+#    offered, and the "shares an id with an earlier one" note appears. GRUB's own
+#    matching also stops at the first, so the picker agrees with what boots.
+menuentry '[GBS TEST] 5 clone first' $menuentry_id_option 'gbs-test-cloned-uuid' {
+	true
+}
+menuentry '[GBS TEST] 6 clone second' $menuentry_id_option 'gbs-test-cloned-uuid' {
+	true
+}
+
+# 7. Title starting with a digit, but carrying a real id. EXPECT: offered and
+#    bound BY ID. This is the case that would silently boot menu entry #7 if the
+#    binding were ever made by title -- verify grub.cfg gets
+#    set default="gbs-test-digit-title", never set default="7 - digit title".
+menuentry '[GBS TEST] 7 - digit title' $menuentry_id_option 'gbs-test-digit-title' {
+	true
+}
+
+# 8. Id containing characters that would break out of the quoting in the
+#    bindings file (sourced by /bin/sh) and in set default="...".
+#    EXPECT: NOT offered -- rejected by the safe-key check, counted in the
+#    "no bindable id or title" note. The title is not used as a fallback here:
+#    the entry has an id, it is just not one we can write down.
+menuentry '[GBS TEST] 8 unsafe id' --id 'gbs-test-$(id)-`id`-"x"' {
+	true
+}
+
+# 9. A submenu whose children look exactly like the per-kernel entries under
+#    "Advanced options". EXPECT: the submenu and everything in it is skipped
+#    entirely -- none of these three appear in the picker. This is what keeps a
+#    binding alive across a kernel upgrade.
+submenu '[GBS TEST] 9 submenu (should be skipped)' $menuentry_id_option 'gbs-test-submenu' {
+	menuentry '[GBS TEST] 9a nested' $menuentry_id_option 'gbs-test-nested-a' {
+		true
+	}
+	menuentry '[GBS TEST] 9b nested' $menuentry_id_option 'gbs-test-nested-b' {
+		true
+	}
+}
+
+# 10. Double-quoted title rather than single-quoted, and a literal --id instead
+#    of $menuentry_id_option. Both spellings occur in hand-written 40_custom
+#    blocks. EXPECT: offered, title shown correctly.
+menuentry "[GBS TEST] 10 double quoted" --id "gbs-test-double-quoted" {
+	true
+}
+
+# 11. No id AND a title starting with a digit -- the one case the title fallback
+#    must refuse, since GRUB reads `set default="11 ..."` as menu index 11 and
+#    would boot whatever sits there. EXPECT: NOT offered, counted with #8 in the
+#    "no bindable id or title" note. (Titled without the [GBS TEST] prefix on
+#    purpose: the digit has to come first.)
+menuentry '11 GBS TEST digit-first title, no id' {
+	true
+}
+# --- end grub-boot-switch manual test entries ---
+EOF
+
+exit 0

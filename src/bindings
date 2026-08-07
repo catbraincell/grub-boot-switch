@@ -1,0 +1,30 @@
+# /etc/grub-boot-switch/bindings
+# Managed by the GRUB Boot Switch app.
+# Set selX to the entry's id or title, which the id is preferred.
+# For this grub.cfg entry:
+#     menuentry 'Debian GNU/Linux' ... $menuentry_id_option 'gnulinux-simple-1234-abcd' ...
+#
+# The selX can be:
+#     sel1="gnulinux-simple-1234-abcd" # Preferred
+#     sel2="Debian GNU/Linux" # If theres no $menuentry_id_option, use the title text instead
+#     sel3="notexist"         # Invalid target jumps to the first menu entry
+#     sel4=""                 # Wait at grub menu
+#
+# List all entries:
+#     sudo grep -E "^menuentry " /boot/grub/grub.cfg
+#
+sel1=""
+sel2=""
+sel3=""
+sel4=""
+sel5=""
+sel6=""
+sel7=""
+sel8=""
+sel9=""
+sel10=""
+sel11=""
+sel12=""
+sel13=""
+sel14=""
+sel15=""

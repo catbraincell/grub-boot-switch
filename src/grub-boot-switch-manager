@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""
+GRUB Boot Switch -- bind each hardware switch position to a stable GRUB
+menuentry.
+
+The app is for managing /etc/grub-boot-switch/bindings
+It re-execs itself through pkexec at startup when launched unprivileged
+
+    grub-boot-switch-manager                  read the system's own grub.cfg
+    grub-boot-switch-manager path/to/grub.cfg read that one instead
+
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, GLib  # noqa: E402
+
+APP_ID = "org.catbraincell.GrubBootSwitch"
+CONF_DIR = "/etc/grub-boot-switch"
+CONFIG = os.path.join(CONF_DIR, "config")
+BINDINGS = os.path.join(CONF_DIR, "bindings")
+GRUB_CFG_CANDIDATES = ["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"]
+UNBOUND = "N/A"
+
+# pkexec starts the target with a sanitised environment, so the session bits GTK
+# needs to reach the display must be handed over explicitly.
+SESSION_ENV = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+               "XDG_SESSION_TYPE", "XDG_DATA_DIRS", "GDK_BACKEND", "LANG")
+
+
+# ---- the real grub.cfg -------------------------------------------------------
+
+def grub_cfg_path():
+    """The grub.cfg location for this distro (Debian: grub, Fedora: grub2)."""
+    for p in GRUB_CFG_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return GRUB_CFG_CANDIDATES[0]
+
+
+# grub-mkconfig does not write a literal "--id": 00_header sets
+#     menuentry_id_option="--id"
+# and every generated entry then reads
+#     menuentry 'Title' --class os $menuentry_id_option 'gnulinux-simple-<uuid>' {
+# so the id token must be matched in both spellings, or the picker sees nothing.
+_ID_RE = re.compile(r"(?:--id|\$\{?menuentry_id_option\}?)\s+"
+                    r"('([^']*)'|\"([^\"]*)\"|(\S+))")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+# A key ends up inside "..." in the bindings file (sourced by /bin/sh) and in
+# `set default="..."` in grub.cfg. Refuse anything that could break out of it.
+_SAFE_ID_RE = re.compile(r'^[^"\\$`\r\n]+$')
+
+# GRUB resolves `default` as a number first, and only falls back to matching
+# names when that fails -- so anything starting with a digit is read as a menu
+# *index*. Harmless for a generated id, but titles start with a digit often
+# enough (and a title is the key when an entry has no id), and binding one would
+# quietly boot whatever entry sits at that position instead.
+_INDEX_LIKE_RE = re.compile(r'\s*[-+]?\d')
+
+# One `selN=` line: (assignment, slot, value, whatever trailed it). Split this
+# way so the value can be rewritten without disturbing the rest of the line. No
+# space is allowed around the `=`, because /bin/sh reads that as a command
+# rather than an assignment and so would the generator.
+_SLOT_RE = re.compile(r'^(\s*sel(\d+)=)("[^"]*"|\'[^\']*\'|[^#\s]*)(.*)$')
+
+_BINDINGS_HEADER = (
+    "# /etc/grub-boot-switch/bindings (written by GRUB Boot Switch)\n"
+    "# One selN= line per switch position: the GRUB menuentry id (or title) to\n"
+    "# auto-boot, blank for unbound. Delete a line to drop that position.\n")
+
+
+def _plural(n, one, many):
+    return f"{n} {one if n == 1 else many}"
+
+
+def _first_quoted(line):
+    m = _QUOTED_RE.search(line)
+    if not m:
+        return ""
+    return m.group(1) if m.group(1) is not None else (m.group(2) or "")
+
+
+def _entry_id(line):
+    m = _ID_RE.search(line)
+    if not m:
+        return ""
+    return next((g for g in (m.group(2), m.group(3), m.group(4)) if g), "")
+
+
+def _bindable(key):
+    """Can `set default="<key>"` reach this entry, and survive the quoting?"""
+    return bool(_SAFE_ID_RE.match(key)) and not _INDEX_LIKE_RE.match(key)
+
+
+def _unquote(value):
+    return value.strip().strip('"').strip("'")
+
+
+def parse_grubcfg(path):
+    """([(key, title)], [note, ...]) -- bindable entries, plus what was left out.
+
+    The key is the entry's id, and its title when it has no id -- the same order
+    GRUB itself resolves `default` in, so either reaches the entry at boot. An id
+    is the stable one; a title is a last resort for hand-written entries.
+
+    Only STABLE, top-level menuentries are bindable. Entries nested in submenus
+    are the version-specific per-kernel ones, so a binding to them would die at
+    the next kernel upgrade: the whole submenu block is skipped.
+    """
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    entries = []
+    seen = set()
+    unusable = dup_id = 0
+    i, n = 0, len(lines)
+    while i < n:
+        raw = lines[i]
+        stripped = raw.lstrip()
+
+        if stripped.startswith("menuentry "):
+            title = _first_quoted(stripped).replace("\t", " ")
+            # Id first, title only when there is no id -- GRUB matches both.
+            key = _entry_id(stripped) or title
+            d = raw.count("{") - raw.count("}")
+            j = i
+            while d > 0 and j + 1 < n:
+                j += 1
+                d += lines[j].count("{") - lines[j].count("}")
+            if not key or not _bindable(key):
+                # Either nothing to name the entry by, or a name that cannot be
+                # used: one that breaks out of the quoting, or one GRUB would
+                # read as a menu index (a title beginning with a digit).
+                unusable += 1
+            elif key in seen:
+                # Two filesystems with the same UUID (a cloned disk) give two
+                # entries one id. GRUB's match loop stops at the first, so offer
+                # the first and nothing else -- then the picker agrees with what
+                # actually boots.
+                dup_id += 1
+            else:
+                seen.add(key)
+                entries.append((key, title or key))
+            i = j + 1
+            continue
+
+        if stripped.startswith("submenu "):
+            d = raw.count("{") - raw.count("}")
+            j = i
+            while d > 0 and j + 1 < n:
+                j += 1
+                d += lines[j].count("{") - lines[j].count("}")
+            i = j + 1
+            continue
+
+        i += 1
+
+    notes = []
+    if unusable:
+        notes.append(_plural(unusable, "entry has", "entries have") +
+                     " no bindable id or title")
+    if dup_id:
+        notes.append(_plural(dup_id, "entry shares", "entries share") +
+                     " an id with an earlier one and is hidden")
+    dup_titles = len(entries) - len({t for _e, t in entries})
+    if dup_titles:
+        notes.append(_plural(dup_titles, "entry has", "entries have") +
+                     " a title identical to another")
+    return entries, notes
+
+
+def load_entries(path=None):
+    """([(id, title)], [note, ...]) from a grub.cfg -- the real one by default.
+
+    A caller-supplied path comes from the command line, so a test fixture can be
+    inspected without touching the system's own grub.cfg.
+    """
+    path = path or grub_cfg_path()
+    if not os.path.exists(path):
+        return [], [f"{path} not found"]
+    try:
+        return parse_grubcfg(path)
+    except OSError as e:  # noqa: BLE001
+        return [], [f"cannot read {path}: {e}"]
+
+
+def update_grub():
+    """Regenerate grub.cfg, whatever this distro calls the command."""
+    if shutil.which("update-grub"):                       # Debian/Ubuntu
+        subprocess.run(["update-grub"], check=False)
+    elif shutil.which("grub2-mkconfig"):                  # Fedora/RHEL/SUSE
+        subprocess.run(["grub2-mkconfig", "-o", grub_cfg_path()], check=False)
+    elif shutil.which("grub-mkconfig"):
+        subprocess.run(["grub-mkconfig", "-o", grub_cfg_path()], check=False)
+
+
+def write_bindings(ids):
+    """Update the bindings table in place. ids maps slot -> key ("" = unbound).
+
+    Only the value of each `selN=` line changes; the line keeps its place and
+    everything else in the file -- comments, blank lines, the reader's own notes
+    after the value -- is copied through untouched. A slot with no line yet is
+    appended, which only happens when the file was missing altogether.
+    """
+    os.makedirs(CONF_DIR, exist_ok=True)
+    try:
+        with open(BINDINGS) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = [_BINDINGS_HEADER]
+
+    pending = dict(ids)
+    out = []
+    for line in lines:
+        m = _SLOT_RE.match(line)
+        if m and int(m.group(2)) in ids:
+            n = int(m.group(2))
+            pending.pop(n, None)   # a slot listed twice: rewrite every copy
+            out.append(f'{m.group(1)}"{ids[n]}"{m.group(4).rstrip()}\n')
+        else:
+            out.append(line)
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    out += [f'sel{n}="{pending[n]}"\n' for n in sorted(pending)]
+
+    tmp = BINDINGS + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(out)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, BINDINGS)
+
+
+def apply_bindings(ids):
+    write_bindings(ids)
+    update_grub()
+
+
+# ---- our own config ----------------------------------------------------------
+
+def read_config():
+    cfg = {"SWITCH_UUID": "", "MENU_TIMEOUT": "-1"}
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                m = re.match(r"\s*(\w+)\s*=\s*(.*)", line)
+                if m and m.group(1) in cfg:
+                    cfg[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+def load_bindings():
+    """{slot: key} in slot order -- one per `selN=` line in the bindings file.
+    """
+    ids = {}
+    try:
+        with open(BINDINGS) as f:
+            for line in f:
+                m = _SLOT_RE.match(line)
+                if m:
+                    ids[int(m.group(2))] = _unquote(m.group(3))
+    except FileNotFoundError:
+        pass
+    return {n: ids[n] for n in sorted(ids)}
+
+
+def detect_switch(magic_uuid):
+    if not magic_uuid:
+        return (False, "No magic UUID configured.")
+    try:
+        out = subprocess.check_output(
+            ["lsblk", "-P", "-o", "NAME,UUID,TRAN,SIZE,MODEL"], text=True)
+    except Exception as e:  # noqa: BLE001
+        return (False, f"lsblk failed: {e}")
+    for line in out.splitlines():
+        f = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        if f.get("UUID", "").upper() == magic_uuid.upper():
+            tran = f.get("TRAN") or "?"
+            model = f.get("MODEL") or ""
+            return (True, f"Found on /dev/{f.get('NAME')} ({tran}, "
+                          f"{f.get('SIZE','')}) {model}".strip())
+    return (False, "Switch not detected.")
+
+
+# ---- GUI ---------------------------------------------------------------------
+
+def ensure_root():
+    """Root or nothing: re-exec through pkexec when started unprivileged."""
+    if os.geteuid() == 0:
+        return
+    if not shutil.which("pkexec"):
+        sys.exit("grub-boot-switch-manager must be run as root "
+                 "(pkexec not found -- try: sudo grub-boot-switch-manager)")
+    env = [f"{k}={os.environ[k]}" for k in SESSION_ENV if k in os.environ]
+    me = os.path.abspath(__file__)
+    try:
+        os.execvp("pkexec", ["pkexec", "env", *env, sys.executable, me,
+                             *sys.argv[1:]])
+    except OSError as e:  # noqa: BLE001
+        sys.exit(f"could not elevate via pkexec: {e}")
+
+
+class Manager(Adw.Application):
+    def __init__(self, cfg_path=None):
+        super().__init__(application_id=APP_ID)
+        self.cfg_path = cfg_path
+        self.connect("activate", self.on_activate)
+
+    def on_activate(self, *_):
+        if getattr(self, "win", None) is not None:
+            # Launching the app again does not start a second process: GTK hands
+            # the activation to the copy already running. Show that window rather
+            # than building another one on top of it -- which also means a copy
+            # started before an edit keeps its own, older UI until it is closed.
+            self.win.present()
+            return
+        self.cfg = read_config()
+        self.build_ui()
+        self.reload()
+        self.on_check()
+        if not self.entries and not self.cfg_path:
+            # Nothing at all in the system's grub.cfg: a fresh install that has
+            # not been generated yet.
+            self.on_rescan()
+
+    # ---- UI ----
+
+    def build_ui(self):
+        self.win = Adw.ApplicationWindow(application=self, title="GRUB Boot Switch")
+        self.win.set_default_size(520, 760)
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+
+        # The file being read decides everything below it, so it belongs where
+        # the eye lands first. reload() fills the subtitle in.
+        self.win_title = Adw.WindowTitle(title="GRUB Boot Switch")
+        header.set_title_widget(self.win_title)
+
+        rescan = Gtk.Button(icon_name="view-refresh-symbolic")
+        rescan.connect("clicked", lambda *_: self.on_rescan())
+        if self.cfg_path:
+            # update-grub would rewrite the system's grub.cfg, which is not the
+            # file on screen -- the list would not budge. Take it off the table.
+            rescan.set_sensitive(False)
+            rescan.set_tooltip_text(f"Disabled: reading {self.cfg_path}, "
+                                    "not the system grub.cfg")
+        else:
+            rescan.set_tooltip_text("Rescan boot entries (runs update-grub)")
+        header.pack_start(rescan)
+
+        self.apply_btn = Gtk.Button(label="Apply")
+        self.apply_btn.add_css_class("suggested-action")
+        self.apply_btn.connect("clicked", lambda *_: self.on_apply())
+        header.pack_end(self.apply_btn)
+        view.add_top_bar(header)
+
+        # Reading somewhere other than the system's grub.cfg: say which file,
+        # and nothing else -- it sits under the header for as long as it applies.
+        if self.cfg_path:
+            view.add_top_bar(Adw.Banner(
+                title="Reading a file, not the system grub.cfg", revealed=True))
+
+        self.page = Adw.PreferencesPage()
+
+        dev = Adw.PreferencesGroup(title="Switch device")
+        self.uuid_row = Adw.ActionRow(title="Magic filesystem UUID",
+                                      subtitle=self.cfg.get("SWITCH_UUID") or "(unset)")
+        check = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
+        check.connect("clicked", lambda *_: self.on_check())
+        self.uuid_row.add_suffix(check)
+        dev.add(self.uuid_row)
+        self.status_row = Adw.ActionRow(title="Status", subtitle="Not checked")
+        dev.add(self.status_row)
+        self.page.add(dev)
+
+        # Where the entry list came from. Always shown: which grub.cfg is being
+        # read decides what every dropdown below can offer.
+        src = Adw.PreferencesGroup(title="Boot entries")
+        self.cfg_row = Adw.ActionRow(title="grub.cfg", subtitle="")
+        self.entries_label = Gtk.Label(valign=Gtk.Align.CENTER)
+        self.entries_label.add_css_class("dim-label")
+        self.cfg_row.add_suffix(self.entries_label)
+        src.add(self.cfg_row)
+        self.page.add(src)
+
+        self.slots_group = Adw.PreferencesGroup(
+            title="Slot bindings",
+            description=f"Switch positions listed in {BINDINGS}")
+        self.page.add(self.slots_group)
+        self.rows = []
+        self.no_slots_row = None
+
+        view.set_content(self.page)
+        self.toasts.set_child(view)
+        self.win.set_content(self.toasts)
+        self.win.present()
+
+    def reload(self):
+        self.entries, notes = load_entries(self.cfg_path)
+        self.bindings = load_bindings()
+
+        path = self.cfg_path or grub_cfg_path()
+        self.cfg_row.set_subtitle(path)
+        self.cfg_row.set_tooltip_text(path)
+        self.entries_label.set_label(_plural(len(self.entries), "entry", "entries"))
+
+        self.records = [None] + list(self.entries)   # index 0 == unbound
+        self.model = Gtk.StringList()
+        self.model.append(UNBOUND)
+        for _id, title in self.entries:
+            self.model.append(title)
+
+        for _n, row in self.rows:
+            self.slots_group.remove(row)
+        self.rows = []
+        if self.no_slots_row is not None:
+            self.slots_group.remove(self.no_slots_row)
+            self.no_slots_row = None
+
+        id_to_index = {e[0]: i + 1 for i, e in enumerate(self.entries)}
+        for n, bound_id in self.bindings.items():
+            row = Adw.ComboRow(title=str(n), model=self.model)
+            if bound_id and bound_id in id_to_index:
+                row.set_selected(id_to_index[bound_id])
+                row.set_subtitle("")
+            elif bound_id:
+                row.set_selected(0)
+                row.set_subtitle(f"target removed: {bound_id}")
+            else:
+                row.set_selected(0)
+                row.set_subtitle("")
+            self.slots_group.add(row)
+            self.rows.append((n, row))
+
+        if not self.rows:
+            # The bindings file is the list of positions, so an empty one leaves
+            # nothing to bind and nothing to show. Say so in place of the rows --
+            # a toast would scroll away and leave a blank window behind.
+            missing = not os.path.exists(BINDINGS)
+            self.no_slots_row = Adw.ActionRow(
+                title="No switch positions to bind",
+                subtitle=(f"{BINDINGS} is missing" if missing else
+                          f"{BINDINGS} has no selN= lines"))
+            self.no_slots_row.add_prefix(
+                Gtk.Image(icon_name="dialog-warning-symbolic"))
+            self.slots_group.add(self.no_slots_row)
+
+        # Nothing to write, and Apply would still run update-grub for nothing.
+        self.apply_btn.set_sensitive(bool(self.rows))
+
+        if notes:
+            self.toast("; ".join(notes))
+
+    # ---- actions ----
+
+    def on_check(self):
+        found, msg = detect_switch(self.cfg.get("SWITCH_UUID"))
+        self.status_row.set_subtitle(("Found " if found else "N/A ") + msg)
+
+    def _warn_if_empty(self, ok):
+        if ok and not self.entries:
+            self.toast("No bootable entries found in grub.cfg.")
+
+    def on_rescan(self):
+        self._run_task(update_grub, "Rescanning...",
+                       reload_after=True, then=self._warn_if_empty)
+
+    def on_apply(self):
+        ids = {}
+        for n, row in self.rows:
+            rec = self.records[row.get_selected()]
+            ids[n] = rec[0] if rec else ""
+        self._run_task(lambda: apply_bindings(ids), "Applying...",
+                       reload_after=True)
+
+    def _run_task(self, fn, msg, reload_after=False, then=None):
+        """Run a blocking system task off the UI thread."""
+        self.apply_btn.set_sensitive(False)
+        self.toast(msg)
+
+        def worker():
+            try:
+                fn()
+                ok, emsg = True, ""
+            except Exception as e:  # noqa: BLE001
+                ok, emsg = False, str(e)
+            GLib.idle_add(self._done, ok, emsg, reload_after, then)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _done(self, ok, msg, reload_after, then=None):
+        if ok and reload_after:
+            self.reload()                             # re-decides Apply itself
+        else:
+            self.apply_btn.set_sensitive(bool(self.rows))
+        self.toast("Done." if ok else f"Failed: {msg}")
+        if then:
+            then(ok)
+        return False
+
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=4))
+
+
+# ---- entry point -------------------------------------------------------------
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        sys.exit(f"usage: {os.path.basename(sys.argv[0])} [grub.cfg]\n"
+                 "  no argument: read the system's own grub.cfg\n"
+                 "  a path:      read this file as grub.cfg")
+    if len(args) > 1:
+        sys.exit(f"usage: {os.path.basename(sys.argv[0])} [grub.cfg]")
+    cfg_path = None
+    if args:
+        # Absolute, because pkexec re-execs us and need not keep the cwd.
+        cfg_path = os.path.abspath(args[0])
+        if not os.path.exists(cfg_path):
+            sys.exit(f"no such file: {cfg_path}")
+        sys.argv[1] = cfg_path
+    ensure_root()
+    Manager(cfg_path).run()
