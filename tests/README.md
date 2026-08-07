@@ -15,8 +15,7 @@ fixtures/empty.cfg         a grub.cfg with no entries at all
 ## 1. The picker, against a fixture
 
 The app takes an optional grub.cfg path and reads its entry list from there
-instead of the system's own. The system's `grub.cfg` is untouched, and **Rescan**
-is greyed out (regenerating it would not change the file you are looking at).
+.
 
 ```sh
 sudo grub-boot-switch-manager tests/fixtures/debian.cfg
@@ -56,14 +55,16 @@ by its title; #8 (unsafe id) and #11 (no id, digit-first title) are dropped; #6
 is hidden behind #5's identical id; #9's submenu is skipped whole; and #3/#4 are
 both offered but flagged as indistinguishable.
 
-Finally the empty case, which is what a fresh install looks like:
+Finally the empty case, a grub.cfg with no entries at all:
 
 ```sh
 sudo grub-boot-switch-manager tests/fixtures/empty.cfg
 ```
 
-Every position shows only `N/A`, and no automatic Rescan fires -- an empty
-fixture is an empty fixture, not a machine that needs `update-grub`.
+Every position shows only `N/A`, the Boot entries group reads `0 entries`, and a
+toast says so. The app does nothing else: nothing here regenerates a grub.cfg on
+its own, since the machine booted from its own copy and an empty one is a file
+worth looking at, not a machine waiting for `update-grub`.
 
 Careful: **Apply** is live in this mode. It writes the real
 `/etc/grub-boot-switch/bindings` and runs the real `update-grub`, so if you press

@@ -193,13 +193,29 @@ def load_entries(path=None):
 
 
 def update_grub():
-    """Regenerate grub.cfg, whatever this distro calls the command."""
+    """Regenerate grub.cfg, whatever this distro calls the command.
+    Raises when the command fails or is missing.
+    """
     if shutil.which("update-grub"):                       # Debian/Ubuntu
-        subprocess.run(["update-grub"], check=False)
+        cmd = ["update-grub"]
     elif shutil.which("grub2-mkconfig"):                  # Fedora/RHEL/SUSE
-        subprocess.run(["grub2-mkconfig", "-o", grub_cfg_path()], check=False)
+        cmd = ["grub2-mkconfig", "-o", grub_cfg_path()]
     elif shutil.which("grub-mkconfig"):
-        subprocess.run(["grub-mkconfig", "-o", grub_cfg_path()], check=False)
+        cmd = ["grub-mkconfig", "-o", grub_cfg_path()]
+    else:
+        raise RuntimeError("no update-grub, grub2-mkconfig or grub-mkconfig "
+                           "on PATH -- grub.cfg cannot be regenerated")
+
+    # Captured rather than inherited: there is no terminal to read it in, and the
+    # message is wanted in the toast instead.
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        # grub-mkconfig narrates its progress on stderr and fails on the last
+        # line, so that line is the diagnostic -- and short enough for a toast.
+        tail = next((ln.strip() for ln in reversed(p.stderr.splitlines())
+                     if ln.strip()), "")
+        raise RuntimeError(f"{cmd[0]} exited {p.returncode}" +
+                           (f": {tail}" if tail else ""))
 
 
 def write_bindings(ids):
@@ -327,10 +343,6 @@ class Manager(Adw.Application):
         self.build_ui()
         self.reload()
         self.on_check()
-        if not self.entries and not self.cfg_path:
-            # Nothing at all in the system's grub.cfg: a fresh install that has
-            # not been generated yet.
-            self.on_rescan()
 
     # ---- UI ----
 
@@ -346,19 +358,14 @@ class Manager(Adw.Application):
         self.win_title = Adw.WindowTitle(title="GRUB Boot Switch")
         header.set_title_widget(self.win_title)
 
-        rescan = Gtk.Button(icon_name="view-refresh-symbolic")
-        rescan.connect("clicked", lambda *_: self.on_rescan())
-        if self.cfg_path:
-            # update-grub would rewrite the system's grub.cfg, which is not the
-            # file on screen -- the list would not budge. Take it off the table.
-            rescan.set_sensitive(False)
-            rescan.set_tooltip_text(f"Disabled: reading {self.cfg_path}, "
-                                    "not the system grub.cfg")
-        else:
-            rescan.set_tooltip_text("Rescan boot entries (runs update-grub)")
-        header.pack_start(rescan)
+        reread = Gtk.Button(icon_name="view-refresh-symbolic")
+        reread.connect("clicked", lambda *_: self.on_rescan())
+        reread.set_tooltip_text("Reload boot entries from grub.cfg")
+        header.pack_start(reread)
 
         self.apply_btn = Gtk.Button(label="Apply")
+        self.apply_btn.set_tooltip_text(
+            "Write the bindings and regenerate grub.cfg (update-grub)")
         self.apply_btn.add_css_class("suggested-action")
         self.apply_btn.connect("clicked", lambda *_: self.on_apply())
         header.pack_end(self.apply_btn)
@@ -467,24 +474,23 @@ class Manager(Adw.Application):
         found, msg = detect_switch(self.cfg.get("SWITCH_UUID"))
         self.status_row.set_subtitle(("Found " if found else "N/A ") + msg)
 
-    def _warn_if_empty(self, ok):
-        if ok and not self.entries:
-            self.toast("No bootable entries found in grub.cfg.")
-
     def on_rescan(self):
-        self._run_task(update_grub, "Rescanning...",
-                       reload_after=True, then=self._warn_if_empty)
+        """Reload grub.cfg and nothing more.
+        """
+        self.reload()
+        self.toast(_plural(len(self.entries), "entry", "entries") + " read"
+                   if self.entries else
+                   "No bootable entries found in grub.cfg.")
 
     def on_apply(self):
         ids = {}
         for n, row in self.rows:
             rec = self.records[row.get_selected()]
             ids[n] = rec[0] if rec else ""
-        self._run_task(lambda: apply_bindings(ids), "Applying...",
-                       reload_after=True)
+        self._run_task(lambda: apply_bindings(ids), "Applying...")
 
-    def _run_task(self, fn, msg, reload_after=False, then=None):
-        """Run a blocking system task off the UI thread."""
+    def _run_task(self, fn, msg):
+        """Run a blocking system task off the UI thread, then show the result."""
         self.apply_btn.set_sensitive(False)
         self.toast(msg)
 
@@ -494,18 +500,18 @@ class Manager(Adw.Application):
                 ok, emsg = True, ""
             except Exception as e:  # noqa: BLE001
                 ok, emsg = False, str(e)
-            GLib.idle_add(self._done, ok, emsg, reload_after, then)
+            GLib.idle_add(self._done, ok, emsg)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _done(self, ok, msg, reload_after, then=None):
-        if ok and reload_after:
+    def _done(self, ok, msg):
+        if ok:
+            # Read back what was written, so the rows show the file's state and
+            # the fresh grub.cfg rather than what was asked for.
             self.reload()                             # re-decides Apply itself
         else:
             self.apply_btn.set_sensitive(bool(self.rows))
         self.toast("Done." if ok else f"Failed: {msg}")
-        if then:
-            then(ok)
         return False
 
     def toast(self, text):
