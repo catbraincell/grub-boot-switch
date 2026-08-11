@@ -150,10 +150,7 @@ STM32. Then uncomment one line near the top of `rp2040/msc_disk.c` or
 
 `NUM_SLOTS` cuts the converter's range into that many equal slots, so turning
 the pot from one stop to the other walks `N` through `0 .. NUM_SLOTS-1`. The
-firmware accepts anything from 2 to 100 — `selNN` carries two digits — but the
-boot side only knows `sel00`..`sel15`, so above 16 the extra positions read as
-"no marker" and land on the GRUB menu. Sixteen slots over one turn is about 20°
-of travel each; fewer slots are easier to hit blind.
+firmware accepts anything from 2 to 100 — `selNN` carries two digits. 
 
 The reading is averaged and each slot is held until the pot is a little past its
 edge, so a wiper parked on a boundary does not flicker between two entries.

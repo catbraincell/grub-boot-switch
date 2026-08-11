@@ -29,6 +29,9 @@ BINDINGS = os.path.join(CONF_DIR, "bindings")
 GRUB_CFG_CANDIDATES = ["/boot/grub/grub.cfg", "/boot/grub2/grub.cfg"]
 UNBOUND = "N/A"
 
+# leave sel0 in config file only
+MENU_SLOT = 0
+
 # pkexec starts the target with a sanitised environment, so the session bits GTK
 # needs to reach the display must be handed over explicitly.
 SESSION_ENV = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
@@ -436,6 +439,8 @@ class Manager(Adw.Application):
 
         id_to_index = {e[0]: i + 1 for i, e in enumerate(self.entries)}
         for n, bound_id in self.bindings.items():
+            if n == MENU_SLOT:
+                continue
             row = Adw.ComboRow(title=str(n), model=self.model)
             if bound_id and bound_id in id_to_index:
                 row.set_selected(id_to_index[bound_id])
@@ -457,7 +462,7 @@ class Manager(Adw.Application):
             self.no_slots_row = Adw.ActionRow(
                 title="No switch positions to bind",
                 subtitle=(f"{BINDINGS} is missing" if missing else
-                          f"{BINDINGS} has no selN= lines"))
+                          f"{BINDINGS} is empty"))
             self.no_slots_row.add_prefix(
                 Gtk.Image(icon_name="dialog-warning-symbolic"))
             self.slots_group.add(self.no_slots_row)

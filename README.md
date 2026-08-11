@@ -79,7 +79,8 @@ sudo update-grub        # or: sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 ## How it works
 
 1. **The switch is a disk.**  
-   The device holds a single file named `selXX`. GRUB tests which one exists 
+   The device holds a single file named `selXX` (two digits, `00` to `99`).
+   GRUB tests which one exists 
    and sets that number into variable `bootswitch`. The file content is 
    completely ignored.
 2. **The number picks a binding, and the binding becomes GRUB's `default`.**  
@@ -100,7 +101,8 @@ sudo update-grub        # or: sudo grub2-mkconfig -o /boot/grub2/grub.cfg
    GRUB jumps to the first menu entry if title matching failed, no timeout.
 6. **Empty stays in the GRUB menu.** 
    `sel00`, or any position with no binding, sets an infinite timeout: the 
-   machine stops at the normal menu and waits for user input.
+   sets an infinite timeout: the machine stops at the normal menu and waits for
+   user input.
 
 Need a specific boot entry? Add your own `xx_probe` with a stable id and bind to it.
 
@@ -129,10 +131,9 @@ into `DESTDIR`, the same as before.
 
 Put more `selX=` in the config file `/etc/grub-boot-switch/bindings` like:
 ```conf
-sel2=""
 sel16=""
-sel17=""
-...
+sel17="linux-6.12.74-custom"
+sel42="gnulinux-simple-1234-abcd"
 ```
 
 ### Add custom targets
