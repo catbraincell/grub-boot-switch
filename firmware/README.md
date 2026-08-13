@@ -14,11 +14,16 @@ from it. Both builds also expose two power buttons over USB: power and sleep.
 
 ## Dependencies
 
-You need `arm-none-eabi-gcc` plus the SDK for your board
+You need `arm-none-eabi-gcc` plus the SDK for your board. picotool must be installed to convert `.elf` to `.uf2` for rp2040 like targets.
 
 ```sh
 # RP2040
 git clone --recursive https://github.com/raspberrypi/pico-sdk.git 
+git clone https://github.com/raspberrypi/picotool.git
+cmake -S picotool -B picotool/build \
+      -DPICO_SDK_PATH=../../pico-sdk -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build picotool/build
+sudo cmake --install picotool/build
 
 # STM32 -- must be compiled once, for each family you target
 git clone --recursive https://github.com/libopencm3/libopencm3.git
@@ -30,6 +35,9 @@ Then pointing the paths to the sdk's
 ```sh
 cmake -B build -S . -DPICO_SDK_PATH=/where/pico-sdk -DOPENCM3_PATH=/where/libopencm3
 ```
+
+`PICO_SDK_PATH` and `OPENCM3_PATH` are also read from the
+environment when the matching flag is left off.
 
 ## Compiling
 

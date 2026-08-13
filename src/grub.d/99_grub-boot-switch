@@ -28,7 +28,7 @@ BINDINGS=/etc/grub-boot-switch/bindings
 
 # Not configured -> emit nothing, leave GRUB untouched.
 if [ -z "$SWITCH_UUID" ]; then
-    echo "# grub-boot-switch: SWITCH_UUID unset in $CONFIG; disabled."
+    echo "grub-boot-switch: SWITCH_UUID unset in $CONFIG; disabled." >&2
     exit 0
 fi
 
@@ -44,20 +44,20 @@ if [ -r "$BINDINGS" ]; then
         # a binding is sel0 .. sel99 unpadded.
         case $num in
             0?*)
-                echo "# grub-boot-switch: ${name}= is not a position name; ignored."
+                echo "grub-boot-switch: ${name}= is not a position name; ignored." >&2
                 continue
                 ;;
         esac
 
         # Marker max 99 -- greater than 99 gets dropped
         if [ ${#num} -gt 2 ]; then
-            echo "# grub-boot-switch: ${name}= is not reachable; ignored."
+            echo "grub-boot-switch: ${name}= is not reachable; ignored." >&2
             continue
         fi
         case " $seen " in
             *" $num "*)
                 # Keeps only the first one for duplicated lines
-                echo "# grub-boot-switch: ${name}= repeats position ${num}; ignored."
+                echo "grub-boot-switch: ${name}= repeats position ${num}; ignored." >&2
                 continue
                 ;;
         esac
@@ -70,10 +70,11 @@ fi
 # Handling "otherwise" case
 if [ -z "$pairs" ]; then
     if [ -r "$BINDINGS" ]; then
-        echo "# grub-boot-switch: no sel<n>= lines in $BINDINGS."
+        echo "grub-boot-switch: no sel<n>= lines in $BINDINGS." >&2
     else
-        echo "# grub-boot-switch: $BINDINGS unreadable."
+        echo "grub-boot-switch: $BINDINGS unreadable." >&2
     fi
+    echo "grub-boot-switch: 0 positions configured." >&2
     exit 0
 fi
 
@@ -97,11 +98,13 @@ for p in $pairs; do
     echo "  if [ -f (\${gbs_dev})/${MARKER_DIR}/sel$(printf '%02d' "$num") ]; then set bootswitch=${num}; fi"
 done
 
+bound=0
 for p in $pairs; do
     num=${p%%:*}
     eval "id=\${${p#*:}:-}"
     if [ -n "$id" ]; then
         echo "  if [ \"\${bootswitch}\" = ${num} ]; then set default=\"${id}\"; set timeout=0; fi"
+        bound=$((bound + 1))
     else
         echo "  if [ \"\${bootswitch}\" = ${num} ]; then ${show_menu}; fi"
     fi
@@ -111,5 +114,8 @@ cat <<EOF2
 fi
 # --- end grub-boot-switch ---
 EOF2
+
+# stderr, so it shows in update-grub's output instead of landing in grub.cfg.
+echo "grub-boot-switch: ${bound} positions configured." >&2
 
 exit 0

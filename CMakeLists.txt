@@ -401,6 +401,9 @@ set(PICO_SDK_PATH "${GBS_PICO_SDK_GUESS}"
     CACHE PATH "pico-sdk checkout used by the 'rp2040' target")
 list(APPEND GBS_TARGETS rp2040)
 
+find_program(GBS_PICOTOOL picotool
+    DOC "picotool executable used by 'rp2040' like targets (found on PATH)")
+
 set(GBS_RP2040_SRC "${GBS_FIRMWARE_DIR}/rp2040")
 set(GBS_RP2040_PROJECT "${CMAKE_BINARY_DIR}/firmware/rp2040-project")
 set(GBS_RP2040_BUILD "${CMAKE_BINARY_DIR}/firmware/rp2040")
@@ -476,6 +479,9 @@ if(NOT GBS_ARM_GCC)
 elseif(NOT EXISTS "${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
     set(GBS_RP2040_IN_ALL "")
     set(GBS_DETAIL_rp2040 "pico-sdk not found (-DPICO_SDK_PATH=...)")
+elseif(NOT GBS_PICOTOOL)
+    set(GBS_RP2040_IN_ALL "")
+    set(GBS_DETAIL_rp2040 "picotool not found (install it)")
 else()
     set(GBS_RP2040_IN_ALL ALL)
     set(GBS_STATE_rp2040 ON)
@@ -487,7 +493,7 @@ if(NOT GBS_STATE_rp2040)
     add_custom_target(rp2040
         COMMAND "${CMAKE_COMMAND}" -E echo "rp2040: ${GBS_DETAIL_rp2040}"
         COMMAND "${CMAKE_COMMAND}" -E echo
-                "See firmware/README.md for how to install the pico-sdk."
+                "See firmware/README.md for how to install the pico-sdk and picotool."
         COMMAND "${CMAKE_COMMAND}" -E false
         VERBATIM)
 else()

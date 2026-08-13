@@ -212,7 +212,7 @@ sudo update-grub
 | target          | what it does                                                |
 |-----------------|-------------------------------------------------------------|
 | `stm32f103c8t6` | `build/gbswitch-<part>.bin` -- firmware (needs libopencm3)  |
-| `rp2040`        | `build/gbswitch-rp2040.uf2` -- firmware (needs pico-sdk)    |
+| `rp2040`        | `build/gbswitch-rp2040.uf2` -- firmware (needs pico-sdk + picotool) |
 
 Firmware targets are named after the exact MCU -- one per part. A missing SDK 
 only drops the targets that need it:
@@ -244,11 +244,16 @@ MCU SDKs:
 
 ```sh
 git clone --recursive https://github.com/raspberrypi/pico-sdk.git
+git clone https://github.com/raspberrypi/picotool.git
+cmake -S picotool -B picotool/build \
+      -DPICO_SDK_PATH=../../pico-sdk -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build picotool/build
+sudo cmake --install picotool/build
 git clone --recursive https://github.com/libopencm3/libopencm3.git
 make -C libopencm3 TARGETS='stm32/f0 stm32/f1 stm32/f4' -j$(nproc)
 ```
 
-Then point the configure step at them:
+Then run configure with paths specified:
 
 ```sh
 cmake -B build -S . -DPICO_SDK_PATH=/where/pico-sdk -DOPENCM3_PATH=/where/libopencm3
