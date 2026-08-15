@@ -20,7 +20,7 @@ import threading
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib  # noqa: E402
+from gi.repository import Gtk, Adw, GLib, Pango  # noqa: E402
 
 APP_ID = "org.catbraincell.GrubBootSwitch"
 CONF_DIR = "/etc/grub-boot-switch"
@@ -328,6 +328,59 @@ def ensure_root():
         sys.exit(f"could not elevate via pkexec: {e}")
 
 
+def entry_factory():
+    """Draw dropdown items ellipsized. A menuentry title is a sentence -- left
+    to size itself the list would decide how wide the window is -- so cut it at
+    the width on offer and keep the whole of it in the tooltip."""
+    factory = Gtk.SignalListItemFactory()
+
+    def setup(_factory, item):
+        item.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
+
+    def bind(_factory, item):
+        text = item.get_item().get_string()
+        label = item.get_child()
+        label.set_label(text)
+        label.set_tooltip_text(text)
+
+    factory.connect("setup", setup)
+    factory.connect("bind", bind)
+    return factory
+
+
+def dismiss_on_outside_click(drop):
+    """Let a click away from an open dropdown close it again.
+
+    GTK closes a popup by looking at where the click landed, but on this setup
+    (X11, no GL) the press that should close it arrives at (0, 0) -- the popup's
+    own top left corner -- so GTK reads it as a click inside and the popup stays
+    up, leaving Escape the only way out. Read (0, 0) as outside instead. That
+    corner is popup padding, so the click it costs is one no one aims for.
+    """
+    popover = None
+    for child in iter_children(drop):
+        if isinstance(child, Gtk.Popover):
+            popover = child
+    if popover is None:                 # a GTK that builds its dropdown some
+        return                          # other way -- leave it to GTK
+
+    def pressed(_gesture, _n_press, x, y):
+        if x == 0 and y == 0:
+            popover.popdown()
+
+    click = Gtk.GestureClick(button=0,
+                             propagation_phase=Gtk.PropagationPhase.CAPTURE)
+    click.connect("pressed", pressed)
+    popover.add_controller(click)
+
+
+def iter_children(widget):
+    child = widget.get_first_child()
+    while child:
+        yield child
+        child = child.get_next_sibling()
+
+
 class Manager(Adw.Application):
     def __init__(self, cfg_path=None):
         super().__init__(application_id=APP_ID)
@@ -430,7 +483,7 @@ class Manager(Adw.Application):
         for _id, title in self.entries:
             self.model.append(title)
 
-        for _n, row in self.rows:
+        for _n, row, _drop in self.rows:
             self.slots_group.remove(row)
         self.rows = []
         if self.no_slots_row is not None:
@@ -441,18 +494,12 @@ class Manager(Adw.Application):
         for n, bound_id in self.bindings.items():
             if n == MENU_SLOT:
                 continue
-            row = Adw.ComboRow(title=str(n), model=self.model)
-            if bound_id and bound_id in id_to_index:
-                row.set_selected(id_to_index[bound_id])
-                row.set_subtitle("")
-            elif bound_id:
-                row.set_selected(0)
-                row.set_subtitle(f"target removed: {bound_id}")
-            else:
-                row.set_selected(0)
-                row.set_subtitle("")
+            note = ("" if not bound_id or bound_id in id_to_index else
+                    f"target removed: {bound_id}")
+            row, drop = self._slot_row(n, note)
+            drop.set_selected(id_to_index.get(bound_id, 0) if bound_id else 0)
             self.slots_group.add(row)
-            self.rows.append((n, row))
+            self.rows.append((n, row, drop))
 
         if not self.rows:
             # The bindings file is the list of positions, so an empty one leaves
@@ -473,6 +520,41 @@ class Manager(Adw.Application):
         if notes:
             self.toast("; ".join(notes))
 
+    def _slot_row(self, n, note):
+        """One switch position: the number, then the entry it boots.
+
+        Built from a plain box rather than AdwActionRow/AdwComboRow, which hand
+        every spare pixel to their title label and leave the value with only
+        what it asks for. Here the title is a single digit and the value is a
+        whole menuentry, so that split is backwards -- the number gets a fixed
+        two characters and the dropdown gets the rest of the row.
+        """
+        row = Adw.PreferencesRow(title=f"Position {n}",
+                                 activatable=False, selectable=False)
+        box = Gtk.Box(spacing=12, margin_top=10, margin_bottom=10,
+                      margin_start=12, margin_end=12)
+        num = Gtk.Label(label=str(n), width_chars=2, xalign=1.0,
+                        valign=Gtk.Align.CENTER)
+        num.add_css_class("heading")
+        box.append(num)
+
+        # hexpand here is what claims the leftover width for the dropdown.
+        rest = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                       hexpand=True, valign=Gtk.Align.CENTER)
+        drop = Gtk.DropDown(model=self.model, factory=entry_factory())
+        dismiss_on_outside_click(drop)
+        rest.append(drop)
+        if note:
+            sub = Gtk.Label(label=note, xalign=0, tooltip_text=note,
+                            ellipsize=Pango.EllipsizeMode.END)
+            sub.add_css_class("dim-label")
+            sub.add_css_class("caption")
+            rest.append(sub)
+        box.append(rest)
+
+        row.set_child(box)
+        return row, drop
+
     # ---- actions ----
 
     def on_check(self):
@@ -489,8 +571,8 @@ class Manager(Adw.Application):
 
     def on_apply(self):
         ids = {}
-        for n, row in self.rows:
-            rec = self.records[row.get_selected()]
+        for n, _row, drop in self.rows:
+            rec = self.records[drop.get_selected()]
             ids[n] = rec[0] if rec else ""
         self._run_task(lambda: apply_bindings(ids), "Applying...")
 
